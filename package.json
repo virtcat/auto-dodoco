@@ -1,0 +1,42 @@
+{
+  "name": "auto-dodoco",
+  "version": "0.1.0",
+  "description": "“嘟嘟可去哪里”求解",
+  "type": "module",
+  "main": "dist-core/core/index.js",
+  "types": "dist-core/core/index.d.ts",
+  "files": [
+    "dist-core"
+  ],
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "build:core": "tsc -p tsconfig.json",
+    "preview": "vite preview",
+    "clean": "node -e \"fs.rmSync('dist',{recursive:true,force:true});fs.rmSync('dist-core',{recursive:true,force:true})\"",
+    "demo": "npm run build:core && node dist-core/examples/demo.js",
+    "test": "npm run build:core && node dist-core/test/solver.test.js",
+    "test:web": "npm run build && node scripts/smoke-web.mjs",
+    "typecheck:app": "tsc -p tsconfig.app.json"
+  },
+  "keywords": [
+    "puzzle",
+    "solver",
+    "typescript",
+    "backtracking",
+    "dodoco"
+  ],
+  "license": "MIT",
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.3.3",
+    "@types/node": "^24.0.0",
+    "jsdom": "^29.1.1",
+    "tailwindcss": "^4.3.3",
+    "typescript": "^5.6.0",
+    "vite": "^8.3.0"
+  },
+  "dependencies": {
+    "@vitejs/plugin-vue": "^6.0.9",
+    "vue": "^3.5.43"
+  }
+}
