@@ -15,10 +15,7 @@
  *   （见下方 `rowLabels` / `colLabels`）。
  */
 import { computed, onBeforeUnmount, onMounted } from "vue";
-import { board, cellMark, setCell } from "./store";
-import { generatePalette } from "./palette";
-
-const palette = computed(() => generatePalette(board.n));
+import { board, cellMark, setCell, palette } from "./store";
 
 /**
  * 所有格子坐标（仅当 N 变化时重算）。

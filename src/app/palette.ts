@@ -3,9 +3,8 @@
  *
  * UI 色板：为 N 色谜题生成 N 个高区分度的颜色（纯前端，不参与求解）。
  *
- * 色相不再按黄金角逐出，而是人工挑选 9 个彼此区分度好的锚点
- * （蓝 / 红 / 绿 / 橙 / 紫 / 黄 / 粉 / 青 / 黄绿），避免黄金角在
- * 绿区（≈90°–170°）落下多个色相造成的“多色相同看都是绿色”问题。
+ * 色相取自人工挑选的 9 个彼此区分度好的锚点
+ * （蓝 / 红 / 绿 / 橙 / 紫 / 黄 / 粉 / 青 / 黄绿）。
  * 前 9 色为饱和度 / 亮度一致的柔和色；第 10 色起（仅大棋盘需要）
  * 复用同一组色相并加深一档亮度，靠明度与浅色档区分。
  *
@@ -37,6 +36,35 @@ export function generatePalette(n: number): PaletteColor[] {
       label: `颜色 ${i + 1}`,
       swatchBg: deep ? `hsl(${hue} 56% 50%)` : `hsl(${hue} 64% 74%)`,
       accent: deep ? `hsl(${hue} 30% 96%)` : `hsl(${hue} 68% 38%)`,
+    });
+  }
+  return colors;
+}
+
+/**
+ * 用一组 RGB 代表色构建调色板。
+ *
+ * 用于"图像识别"场景：把检测到的 N 个真实代表色 `reps[c] = [r, g, b]`
+ * 作为画笔 / 棋盘底色，使界面颜色与原始截图一致。
+ * 强调色（编号文字 / 选中描边）按底色亮度自动取深色或浅色，保证对比度。
+ *
+ * @param n     颜色数（取前 n 个代表色）。
+ * @param reps  代表色数组，`reps[c] = [r, g, b]`（0–255）；缺失项回退中性灰。
+ */
+export function paletteFromReps(n: number, reps: number[][]): PaletteColor[] {
+  const colors: PaletteColor[] = [];
+  for (let i = 0; i < n; i++) {
+    const rgb = reps[i];
+    const r = Math.round(rgb?.[0] ?? 200);
+    const g = Math.round(rgb?.[1] ?? 200);
+    const b = Math.round(rgb?.[2] ?? 200);
+    // 感知亮度（ITU-R BT.601），用于决定强调色取深 / 浅。
+    const lum = 0.299 * r + 0.587 * g + 0.114 * b;
+    colors.push({
+      id: i,
+      label: `颜色 ${i + 1}`,
+      swatchBg: `rgb(${r}, ${g}, ${b})`,
+      accent: lum > 150 ? "rgb(30, 30, 30)" : "rgb(255, 255, 255)",
     });
   }
   return colors;

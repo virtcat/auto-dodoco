@@ -44,6 +44,8 @@ ok(!!$(".board-frame"), "棋盘容器已渲染");
 ok($$(".board-cell").length === 36, `渲染 36 个格子（实际 ${$$(".board-cell").length}）`);
 ok($$(".swatch").length === 6, "渲染 6 个画笔颜色");
 ok(!!$('[data-action="random"]'), "随机着色按钮存在");
+ok(!!$(".recog-drop"), "图像识别拖放区已渲染");
+ok(!!$('input[type="file"]'), "图像选择 input 存在");
 
 console.log("[冒烟] 切换画笔颜色");
 const swatchOf = (id) =>

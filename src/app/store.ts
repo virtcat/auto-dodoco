@@ -12,7 +12,7 @@
  *  - `cellMark(x, y)`：读取当前解中某格的标记（嘟嘟可 / 空白格）。
  */
 
-import { reactive } from "vue";
+import { computed, reactive } from "vue";
 import {
   CellState,
   DEFAULT_SOLVER_OPTIONS,
@@ -20,6 +20,7 @@ import {
   type SolutionResult,
   type SolverOptions,
 } from "../core/index.js";
+import { generatePalette, paletteFromReps, type PaletteColor } from "./palette";
 import { resolveEngine, type SolveHandle } from "./solveEngine.js";
 
 /** 允许的最小棋盘边长 N。 */
@@ -45,6 +46,11 @@ interface BoardState {
   colors: number[][];
   /** 当前画笔选中的颜色编号。 */
   selectedColor: number;
+  /**
+   * 图像识别得到的代表色，`reps[c] = [r, g, b]`（按颜色编号 0..N-1 顺序）。
+   * 为 `null` 时使用默认高区分度调色板。
+   */
+  detectedReps: number[][] | null;
 }
 
 interface SolveState {
@@ -70,6 +76,19 @@ export const board = reactive<BoardState>({
   k: 1,
   colors: blank(MIN_N),
   selectedColor: 0,
+  detectedReps: null,
+});
+
+/**
+ * 当前生效的调色板（响应式）。
+ *
+ * 有图像识别代表色（`detectedReps` 长度与 N 一致）时，用真实检测色作为画笔 /
+ * 棋盘底色；否则回退到默认高区分度调色板。
+ */
+export const palette = computed<PaletteColor[]>(() => {
+  const reps = board.detectedReps;
+  if (reps && reps.length === board.n) return paletteFromReps(board.n, reps);
+  return generatePalette(board.n);
 });
 
 /** 单例求解状态（响应式代理）。 */
@@ -173,7 +192,7 @@ export function cellMark(x: number, y: number): CellMark {
 /* 状态变更（棋盘变化时自动清除旧求解结果）                               */
 /* ------------------------------------------------------------------ */
 
-/** 设置边长 N；保留旧盘面 (0,0) 起（x、y 索引最小一角）的重叠区域，超出范围的颜色做取模重映射。 */
+/** 设置边长 N；保留旧盘面 (0,0) 起（x、y 索引最小一角）的重叠区域，超出范围的颜色做取模重映射。手动改 N 会使识别代表色失效（回退默认调色板）。 */
 export function setN(next: number): void {
   const n = clampN(next);
   if (n === board.n) return;
@@ -186,6 +205,7 @@ export function setN(next: number): void {
   );
   board.n = n;
   board.selectedColor = Math.min(board.selectedColor, n - 1);
+  board.detectedReps = null;
   clearSolution();
 }
 
@@ -231,6 +251,35 @@ export function randomFill(): void {
   }
   for (; p < total; p++) flat[order[p]!] = Math.floor(Math.random() * n);
   board.colors = Array.from({ length: n }, (_, y) => flat.slice(y * n, (y + 1) * n));
+  clearSolution();
+}
+
+/**
+ * 应用图像识别结果：一次设置边长 N、颜色矩阵与代表色（N / 颜色数自动对齐），并清除旧求解结果。
+ *
+ * **坐标翻转**：检测用图像坐标系（`colors[0]` 为图片**顶行**），棋盘 / core 用
+ * 数学坐标系（`y=0` 为**底行**，见 `BoardView`）。故此处按行垂直翻转，使图片顶行
+ * 落在棋盘顶行（`y = size-1`），避免识别结果上下颠倒。
+ *
+ * `n` / `colors` / `reps` 来自 `detectBoard`；若 `n` 超出 `MIN_N..MAX_N` 会先夹取，
+ * 颜色矩阵随之取对应 `n×n` 区域，越界颜色取模回 `[0, n-1]`，代表色取前 n 个，保证盘面自洽。
+ */
+export function applyDetectedBoard(n: number, colors: number[][], reps?: number[][]): void {
+  const size = clampN(n);
+  board.colors = Array.from({ length: size }, (_, y) =>
+    Array.from({ length: size }, (_, x) => {
+      // 垂直翻转：棋盘第 y 行（y=0 底行） ← 检测第 (size-1-y) 行（0=顶行）
+      const c = colors[size - 1 - y]?.[x] ?? 0;
+      return c >= size ? c % size : c;
+    }),
+  );
+  board.n = size;
+  board.selectedColor = Math.min(board.selectedColor, size - 1);
+  // 代表色按颜色编号 0..size-1 取前 size 个；缺失则回退默认调色板。
+  board.detectedReps =
+    reps && reps.length >= size
+      ? reps.slice(0, size).map((rgb) => [rgb[0] ?? 0, rgb[1] ?? 0, rgb[2] ?? 0])
+      : null;
   clearSolution();
 }
 

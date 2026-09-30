@@ -11,13 +11,15 @@
  *  - “结束求解” → `store.stopSolve()`（提前终止进行中的求解）；
  *  - “推理链”卡片逐步渲染 `SolutionResult.reasoningChain`。
  */
-import { computed, ref } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref } from "vue";
 import {
+  applyDetectedBoard,
   board,
   clearBoard,
   clearSolution,
   MAX_N,
   MIN_N,
+  palette,
   randomFill,
   setK,
   setMaxSolutions,
@@ -28,13 +30,179 @@ import {
   stopSolve,
 } from "./store";
 import type { ReasoningRule } from "../core/index.js";
-import { generatePalette } from "./palette";
+import { imageToBoardImage, type ImageSource } from "./boardImage";
+import { detectBoard, type BoardImage } from "./boardDetect";
 import BoardView from "./BoardView.vue";
-
-const palette = computed(() => generatePalette(board.n));
 
 /** “高级设置”折叠区是否展开（默认折叠）。 */
 const advancedOpen = ref(false);
+
+/* ------------------------------------------------------------------ */
+/* 图像识别：选文件 / 拖入 / 粘贴 → 识别 → 填入棋盘（N + 颜色矩阵）        */
+/* ------------------------------------------------------------------ */
+
+type RecogStatus = "idle" | "working" | "done" | "error";
+
+/** 识别流程状态。 */
+const recogStatus = ref<RecogStatus>("idle");
+/** 识别状态文案（成功概要 + 用时 / 失败原因）。 */
+const recogMessage = ref("");
+/** 拖拽悬停高亮。 */
+const dragOver = ref(false);
+/** 文件选择 input 引用。 */
+const fileInput = ref<HTMLInputElement | null>(null);
+/** 识别缩略图 canvas 引用（显示原图 + 红框标出的棋盘范围）。 */
+const thumbCanvas = ref<HTMLCanvasElement | null>(null);
+/** 识别成功后是否显示缩略图。 */
+const showThumb = ref(false);
+
+/** 高优先级计时（毫秒，亚毫秒精度；无 `performance` 时回退 `Date.now`）。 */
+function nowMs(): number {
+  return typeof performance !== "undefined" ? performance.now() : Date.now();
+}
+
+/** 把毫秒格式化为可读的"用时"文本。 */
+function fmtMs(ms: number): string {
+  if (ms < 1000) return `${Math.round(ms)} ms`;
+  return `${(ms / 1000).toFixed(2)} s`;
+}
+
+/** 绘制识别缩略图：原图等比缩小，并用红框标出识别到的棋盘范围（`bbox`）。 */
+function drawThumb(img: BoardImage, bbox: [number, number, number, number]): void {
+  const canvas = thumbCanvas.value;
+  if (!canvas) return;
+  const MAX_W = 280; // 缩略图最大宽（px）
+  const scale = Math.min(1, MAX_W / img.width);
+  const tw = Math.max(1, Math.round(img.width * scale));
+  const th = Math.max(1, Math.round(img.height * scale));
+
+  // 原图像素先写入离屏 canvas
+  const off = document.createElement("canvas");
+  off.width = img.width;
+  off.height = img.height;
+  const octx = off.getContext("2d", { willReadFrequently: true });
+  if (!octx) return;
+  const id = octx.createImageData(img.width, img.height);
+  id.data.set(img.rgba);
+  octx.putImageData(id, 0, 0);
+
+  // 等比缩小绘制到缩略 canvas
+  canvas.width = tw;
+  canvas.height = th;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return;
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = "high";
+  ctx.drawImage(off, 0, 0, tw, th);
+
+  // 红框：`bbox`（[x0, y0, x1, y1]，原图坐标）按同一比例映射到缩略图
+  const [x0, y0, x1, y1] = bbox;
+  if (x1 > x0 && y1 > y0) {
+    ctx.lineWidth = Math.max(2, Math.round(tw * 0.012));
+    ctx.strokeStyle = "#ef4444";
+    ctx.strokeRect(x0 * scale, y0 * scale, (x1 - x0) * scale, (y1 - y0) * scale);
+  }
+}
+
+/** 核心：把任意图像来源送入识别，成功后填入棋盘（N + 颜色矩阵 + 代表色），并显示用时与缩略图。 */
+async function handleImage(src: ImageSource): Promise<void> {
+  recogStatus.value = "working";
+  recogMessage.value = "识别中…";
+  showThumb.value = false;
+  const t0 = nowMs();
+  try {
+    const boardImage = await imageToBoardImage(src);
+    const result = detectBoard(boardImage);
+    if (result.ok) {
+      applyDetectedBoard(result.n, result.colors, result.reps);
+      const [bx0, by0, bx1, by1] = result.bbox;
+      const hasBbox = bx1 > bx0 && by1 > by0;
+      if (hasBbox) showThumb.value = true;
+      const ms = nowMs() - t0;
+      recogStatus.value = "done";
+      recogMessage.value = `识别成功：${result.n}×${result.n}，${result.n} 种颜色（用时 ${fmtMs(ms)}）`;
+      if (hasBbox) {
+        await nextTick(); // 等待缩略图 canvas 进入 DOM 后再绘制
+        drawThumb(boardImage, result.bbox);
+      }
+    } else {
+      recogStatus.value = "error";
+      recogMessage.value = result.error ?? "识别失败";
+    }
+  } catch (e) {
+    recogStatus.value = "error";
+    recogMessage.value = e instanceof Error ? e.message : "识别失败";
+  }
+}
+
+/** 文件选择（点击 / input change）。 */
+function onFilePicked(e: Event): void {
+  const input = e.target as HTMLInputElement;
+  const file = input.files?.[0];
+  input.value = ""; // 清空以便重复选择同一文件
+  if (file && file.type.startsWith("image/")) void handleImage(file);
+}
+
+/** 拖入图片。 */
+function onDrop(e: DragEvent): void {
+  e.preventDefault();
+  dragOver.value = false;
+  const files = e.dataTransfer?.files;
+  if (files && files.length > 0) {
+    const file = files[0];
+    if (file && file.type.startsWith("image/")) void handleImage(file);
+    return;
+  }
+  // 拖入的可能是"从剪贴板复制的图片"（以 item 形式存在）
+  const items = e.dataTransfer?.items;
+  if (items) {
+    for (const item of Array.from(items)) {
+      if (item.kind === "file") {
+        const f = item.getAsFile();
+        if (f && f.type.startsWith("image/")) {
+          void handleImage(f);
+          return;
+        }
+      }
+    }
+  }
+}
+
+/** 从剪贴板粘贴图片（Ctrl+V）。 */
+function onPaste(e: ClipboardEvent): void {
+  const items = e.clipboardData?.items;
+  if (!items) return;
+  for (const item of Array.from(items)) {
+    if (item.kind === "file" && item.type.startsWith("image/")) {
+      const f = item.getAsFile();
+      if (f) {
+        e.preventDefault();
+        void handleImage(f);
+        break;
+      }
+    }
+  }
+}
+
+/** 阻止浏览器在页面任意位置拖放图片时"直接打开/导航"（让拖入只作用于识别区）。 */
+function onWindowDragOver(e: Event): void {
+  if (e.dataTransfer) e.preventDefault();
+}
+function onWindowDrop(e: Event): void {
+  if (e.dataTransfer) e.preventDefault();
+}
+
+onMounted(() => {
+  document.addEventListener("paste", onPaste);
+  window.addEventListener("dragover", onWindowDragOver);
+  window.addEventListener("drop", onWindowDrop);
+});
+
+onBeforeUnmount(() => {
+  document.removeEventListener("paste", onPaste);
+  window.removeEventListener("dragover", onWindowDragOver);
+  window.removeEventListener("drop", onWindowDrop);
+});
 
 /** 边长步进器支持方向键增减。 */
 function onStepperKey(e: KeyboardEvent): void {
@@ -110,7 +278,6 @@ const badgeState = computed(() =>
             嘟嘟可在哪里 1 & 2 自动求解
           </p>
         </div>
-        <!-- <span class="stage-badge ml-auto shrink-0">求解已接入</span> -->
       </div>
     </header>
 
@@ -150,10 +317,9 @@ const badgeState = computed(() =>
                 +
               </button>
             </div>
-            <p class="control-hint">{{ MIN_N }} – {{ MAX_N }} 的整数，越大求解耗时越长</p>
           </div>
           <div>
-            <span class="control-label">模式参数 K</span>
+            <span class="control-label">模式参数 K：每行 / 每列 / 每色恰好 K 个嘟嘟可</span>
             <div class="seg" role="group" aria-label="模式参数 K">
               <button
                 type="button"
@@ -174,7 +340,6 @@ const badgeState = computed(() =>
                 K = 2
               </button>
             </div>
-            <p class="control-hint">每行 / 每列 / 每色恰好 K 个嘟嘟可</p>
           </div>
         </div>
 
@@ -206,6 +371,72 @@ const badgeState = computed(() =>
       </section>
       <!-- ============ 求解操作区（右侧） ============ -->
       <aside class="space-y-5" aria-label="求解操作区">
+        <!-- ============ 图像识别（独立面板：选文件 / 拖入 / 粘贴） ============ -->
+        <section class="card p-5" aria-label="图像识别">
+          <div class="flex items-center justify-between">
+            <h2 class="text-sm font-semibold text-slate-900">从截图识别</h2>
+          </div>
+
+          <div class="mt-3">
+            <div
+              class="recog-drop"
+              :class="{ 'is-active': dragOver, 'is-working': recogStatus === 'working' }"
+              role="button"
+              tabindex="0"
+              :aria-busy="recogStatus === 'working'"
+              @click="fileInput?.click()"
+              @dragover.prevent="dragOver = true"
+              @dragleave="dragOver = false"
+              @drop="onDrop"
+              @keydown.enter.prevent="fileInput?.click()"
+            >
+              <svg width="26" height="26" viewBox="0 0 26 26" fill="none" aria-hidden="true">
+                <rect x="2.5" y="3.5" width="21" height="16" rx="2.6" stroke="currentColor" stroke-width="1.5" />
+                <path
+                  d="M6 16.5l3.6-4 2.7 3 2.4-2.6 3.3 3.6"
+                  stroke="currentColor"
+                  stroke-width="1.5"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                />
+                <circle cx="9" cy="8.6" r="1.5" fill="currentColor" />
+              </svg>
+              <div class="recog-text">
+                <p class="recog-main">点击选择图片 / 拖入图片 / 粘贴图片</p>
+                <p class="recog-sub">自动识别，填入棋盘并设置行列数</p>
+              </div>
+            </div>
+            <input
+              ref="fileInput"
+              type="file"
+              accept="image/png,image/jpeg,image/webp,image/bmp"
+              class="sr-only-input"
+              aria-label="选择棋盘截图文件"
+              @change="onFilePicked"
+            />
+
+            <!-- 识别缩略图：原图等比缩小，红框标出识别到的棋盘范围 -->
+            <div v-if="showThumb" class="recog-thumb-wrap">
+              <canvas
+                ref="thumbCanvas"
+                class="recog-thumb"
+                role="img"
+                aria-label="识别到的棋盘范围（红框）"
+              ></canvas>
+            </div>
+
+            <p
+              v-if="recogMessage"
+              class="recog-status"
+              :data-state="recogStatus"
+              role="status"
+            >
+              <span v-if="recogStatus === 'working'" class="spinner" aria-hidden="true"></span>
+              {{ recogMessage }}
+            </p>
+          </div>
+        </section>
+
         <section class="card p-5" aria-label="求解">
           <div class="flex items-center justify-between">
             <h2 class="text-sm font-semibold text-slate-900">求解</h2>
@@ -269,7 +500,7 @@ const badgeState = computed(() =>
             <span class="spinner" aria-hidden="true"></span>
             <span>求解中…规则引擎正在推导</span>
           </div>
-          <p v-else class="idle-hint">求解后在此展示结果概要，推理链详情见下方「高级设置」。</p>
+          <p v-else class="idle-hint">求解后在此展示结果概要。</p>
 
           <!-- 高级设置：默认折叠，点击展开 -->
           <div class="adv" data-advanced>
@@ -281,7 +512,6 @@ const badgeState = computed(() =>
               @click="advancedOpen = !advancedOpen"
             >
               <span class="adv-title">高级设置</span>
-              <span class="adv-sub">推理链 {{ hasResult ? `${chain.length} 步` : "待求解" }}</span>
               <svg
                 class="adv-chevron"
                 :class="{ 'is-open': advancedOpen }"

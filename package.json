@@ -17,6 +17,7 @@
     "demo": "npm run build:core && node dist-core/examples/demo.js",
     "test": "npm run build:core && node dist-core/test/solver.test.js",
     "test:web": "npm run build && node scripts/smoke-web.mjs",
+    "test:detect": "node scripts/test-detect.mjs",
     "typecheck:app": "tsc -p tsconfig.app.json"
   },
   "keywords": [
