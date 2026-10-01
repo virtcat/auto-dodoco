@@ -1,0 +1,29 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  // CloudFlare Worker 名称：如与你现有的静态资产 Worker 名不一致，请改成现有名称以覆盖更新。
+  "name": "auto-dodoco",
+  // Worker 入口（JS，wrangler 自动打包；Durable Object `SolveCounter` 在此导出）。
+  "main": "worker/index.js",
+  "compatibility_date": "2025-06-01",
+  // 静态资产：`vite build` 产物 `dist/`，绑定名 `ASSETS`（Worker 里 `env.ASSETS.fetch` 转发）。
+  "assets": {
+    "directory": "./dist",
+    "binding": "ASSETS"
+  },
+  // Durable Object：求解次数计数器（全局单例 `idFromName("global")`）。
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "COUNTER",
+        "class_name": "SolveCounter"
+      }
+    ]
+  },
+  // 显式声明 SolveCounter 为「SQLite Durable Object」（用 ctx.storage.sql 读写）。
+  "exports": {
+    "SolveCounter": {
+      "type": "durable-object",
+      "storage": "sqlite"
+    }
+  }
+}

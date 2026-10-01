@@ -29,6 +29,7 @@ import {
   startSolve,
   stopSolve,
 } from "./store";
+import { loadStats, solveStats } from "./counter";
 import type { ReasoningRule } from "../core/index.js";
 import { imageToBoardImage, type ImageSource } from "./boardImage";
 import { detectBoard, type BoardImage } from "./boardDetect";
@@ -196,6 +197,8 @@ onMounted(() => {
   document.addEventListener("paste", onPaste);
   window.addEventListener("dragover", onWindowDragOver);
   window.addEventListener("drop", onWindowDrop);
+  // 拉取求解次数统计（页面底部小字；失败静默）
+  void loadStats();
 });
 
 onBeforeUnmount(() => {
@@ -602,5 +605,12 @@ const badgeState = computed(() =>
 
       </aside>
     </main>
+
+    <footer class="mx-auto w-full max-w-[1240px] px-4 pb-6 pt-1 sm:px-6">
+      <p v-if="solveStats.loaded" class="text-center text-[11px] text-slate-400">
+        已求解：共 {{ solveStats.total.toLocaleString() }} 次 · 近 24 小时 {{ solveStats.last24h.toLocaleString() }} 次
+      </p>
+      <p v-else class="text-center text-[11px] text-slate-400">已求解：统计加载中…</p>
+    </footer>
   </div>
 </template>

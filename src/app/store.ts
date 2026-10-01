@@ -22,6 +22,7 @@ import {
 } from "../core/index.js";
 import { generatePalette, paletteFromReps, type PaletteColor } from "./palette";
 import { resolveEngine, type SolveHandle } from "./solveEngine.js";
+import { reportSolve } from "./counter";
 
 /** 允许的最小棋盘边长 N。 */
 export const MIN_N = 6;
@@ -146,6 +147,8 @@ export async function startSolve(): Promise<void> {
     if (reply.ok) {
       solve.result = reply.result;
       solve.status = "done";
+      // 成功求解时上报一次计数（fire-and-forget，失败静默，不影响主流程）
+      if (reply.result?.solved) reportSolve();
     } else {
       solve.error = reply.error;
       solve.status = "error";
