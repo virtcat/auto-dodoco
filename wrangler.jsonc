@@ -4,7 +4,7 @@
   "name": "auto-dodoco",
   // Worker 入口（JS，wrangler 自动打包；Durable Object `SolveCounter` 在此导出）。
   "main": "worker/index.js",
-  "compatibility_date": "2025-06-01",
+  "compatibility_date": "2026-01-01",
   // 静态资产：`vite build` 产物 `dist/`，绑定名 `ASSETS`（Worker 里 `env.ASSETS.fetch` 转发）。
   "assets": {
     "directory": "./dist",
@@ -19,7 +19,8 @@
       }
     ]
   },
-  // 显式声明 SolveCounter 为「SQLite Durable Object」（用 ctx.storage.sql 读写）。
+  // 声明 SolveCounter 为「SQLite Durable Object」（exports 为 CloudFlare 现行流程，
+  // 已创建后无法回退到 `migrations`；详见部署错误 code 100403）。
   "exports": {
     "SolveCounter": {
       "type": "durable-object",
