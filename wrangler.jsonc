@@ -5,6 +5,7 @@
   // Worker 入口（JS，wrangler 自动打包；Durable Object `SolveCounter` 在此导出）。
   "main": "worker/index.js",
   "compatibility_date": "2026-01-01",
+  "workers_dev": false,
   // 静态资产：`vite build` 产物 `dist/`，绑定名 `ASSETS`（Worker 里 `env.ASSETS.fetch` 转发）。
   "assets": {
     "directory": "./dist",

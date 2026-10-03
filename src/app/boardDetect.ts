@@ -46,7 +46,7 @@ export interface BoardImage {
 }
 
 /** 各格"有色区域"的边界（已排除格线缝隙）。 */
-interface BoardBounds {
+export interface BoardBounds {
   lefts: number[];
   rights: number[];
   tops: number[];
@@ -232,7 +232,7 @@ function findPeaks(
   return kept;
 }
 
-interface PairResult {
+export interface PairResult {
   /** 列宽（宽间隔族）。 */
   g: number;
   /** 列中心间距（pitch）。 */
@@ -245,46 +245,64 @@ interface PairResult {
   n: number;
 }
 
-/**
- * 对数值间隔数组建直方图，返回按频次降序的前 `topN` 个"间隔值（bin 中心）"。
- */
-function histTopValues(
-  d: number[],
-  topN: number,
-): Array<{ value: number; count: number }> {
-  const lo = Math.floor(Math.min(...d));
-  const hi = Math.ceil(Math.max(...d));
-  const nbins = hi - lo + 1;
-  if (nbins <= 0) return [];
-  const hist = new Array<number>(nbins).fill(0);
-  for (const v of d) {
-    let idx = Math.floor(v - lo);
-    if (idx < 0) idx = 0;
-    else if (idx >= nbins) idx = nbins - 1;
-    hist[idx]!++;
-  }
-  const order = hist
-    .map((c, idx) => [idx, c] as [number, number])
-    .sort((a, b) => b[1] - a[1]);
-  const out: Array<{ value: number; count: number }> = [];
-  for (const [idx, c] of order) {
-    if (c <= 0) break;
-    out.push({ value: lo + idx + 0.5, count: c });
-    if (out.length === topN) break;
-  }
-  return out;
-}
 
 /**
  * [1] 统计配对：从强峰中找出"列"（两条相邻格线夹住的区域）。
  *
- * 格线常成对（双线），故峰间隔有两个重复族：窄族（双线间距）与宽族（列宽）。
- * 取两个最常见间隔中**较大的**作为列宽 `g`，把间隔约等于 `g` 的相邻峰两两配对，
- * 并要求列中心等距重复（`pitch` 一致性校验）。
+ * 格线常成对（双线），故峰间隔存在多个重复族：窄族（缝隙/双线间距）与宽族（列宽），
+ * 截图里的 UI 还会贡献更多小间隔族。
+ *
+ * **多族投票**：出现次数足够（≥ MIN_FAMILY_COUNT）且列宽达标（≥ MIN_CELL）的每个间隔值
+ * 都作为候选"列宽族"，逐族独立做 配对 + 等距网格（pitch + phase）拟合 + 一致性打分，
+ * 再择优。择优规则：
+ *   1. consistency（列中心等距程度，按最稠密连续列块计，孤立 UI 假列不拖累）——高者胜：
+ *      真实棋盘是制造出来的等距网格，UI 不是；
+ *   2. strength（保留列边界格线的平均强度）——高者胜；差距在噪声带内视为平手；
+ *   3. 列宽 `g`——大者胜（“列”间隔宽于“缝隙”间隔）。
  */
+/** 间隔族进入投票的最少配对数（过少则统计上站不住脚）。 */
+const MIN_FAMILY_COUNT = 4;
+/** 最小列宽（px）：窄于它的"列"对采样无意义（见 sampleCells 的 minSize 防护）。 */
+const MIN_CELL = 8;
+/** 强度平手噪声带（相对值）：两族强度差在此带内视为平手，改按"列宽较大者胜"。 */
+const STRENGTH_TIE_BAND = 0.1;
+/** "最稠密连续列块"的连续判定：相邻列中心间距 ≤ 该倍数·pitch 视为连续（孤立的 UI 假列在此被切出）。 */
+const RUN_GAP_FRAC = 1.5;
+
+/** 单个"列宽族"的投票明细（调试用）。 */
+export interface FamilyScore {
+  /** 族的间隔值（列宽）。 */
+  g: number;
+  /** 该间隔的出现次数。 */
+  count: number;
+  /** 族内候选列数（间距 ≈ g 的相邻强峰对）。 */
+  pairs: number;
+  /** 等距网格检验后保留的列数。 */
+  kept: number;
+  /** 等距一致性（越接近 1 越像等距网格）。 */
+  consistency: number;
+  /** 保留列的平均强度（每列两条边界格线强度的均值）。 */
+  strength: number;
+  /** 是否为胜出族。 */
+  winner: boolean;
+}
+
+interface FamilyResult {
+  g: number;
+  count: number;
+  pairs: number;
+  kept: number;
+  consistency: number;
+  strength: number;
+  pitch: number;
+  colPairs: Array<[number, number]>;
+  viable: boolean;
+}
+
 function statisticalPairing(
   peaks: number[],
   col: ArrayLike<number>,
+  famsOut?: FamilyScore[],
 ): PairResult | null {
   const maxCol = maxOf(col);
   let strong = peaks.filter((p) => col[p]! >= STRONG_FRAC * maxCol);
@@ -295,28 +313,87 @@ function statisticalPairing(
   for (let i = 0; i < strong.length - 1; i++) d.push(strong[i + 1]! - strong[i]!);
   if (d.length === 0) return null;
 
-  // 两个最常见的间隔（窄 + 宽族），取较大的为列宽
-  const cand = histTopValues(d, 2);
-  if (cand.length === 0) return null;
-  const g = Math.max(...cand.map((c) => c.value));
+  // 候选族：间隔值 v + 0.5（单位宽直方图），出现次数 ≥ MIN_FAMILY_COUNT 且列宽 ≥ MIN_CELL
+  const lo = Math.floor(Math.min(...d));
+  const hi = Math.ceil(Math.max(...d));
+  const nbins = hi - lo + 1;
+  const hist = new Array<number>(nbins).fill(0);
+  for (const v of d) {
+    let idx = Math.floor(v - lo);
+    if (idx < 0) idx = 0;
+    else if (idx >= nbins) idx = nbins - 1;
+    hist[idx]!++;
+  }
+  const fams: Array<{ g: number; count: number }> = [];
+  for (let idx = 0; idx < nbins; idx++) {
+    const g = lo + idx + 0.5;
+    if (hist[idx]! >= MIN_FAMILY_COUNT && g >= MIN_CELL) fams.push({ g, count: hist[idx]! });
+  }
+  if (fams.length === 0) return null;
 
+  // 多族投票：逐族拟合，按 "consistency → strength → 列宽较大者胜" 择优
+  const results: FamilyResult[] = [];
+  let best: FamilyResult | null = null;
+  for (const fam of fams) {
+    const r = fitFamily(strong, d, col, fam.g, fam.count);
+    results.push(r);
+    if (betterFamily(r, best)) best = r;
+  }
+  if (famsOut) {
+    for (const r of results) {
+      famsOut.push({
+        g: r.g,
+        count: r.count,
+        pairs: r.pairs,
+        kept: r.kept,
+        consistency: r.consistency,
+        strength: r.strength,
+        winner: r === best,
+      });
+    }
+  }
+  if (best === null || !best.viable) return null;
+  return { g: best.g, pitch: best.pitch, consistency: best.consistency, pairs: best.colPairs, n: best.kept };
+}
+
+/** 拟合单个"列宽族"：按 g 配对 → 等距网格（pitch + phase）检验 → consistency / strength 打分。 */
+function fitFamily(
+  strong: number[],
+  d: number[],
+  col: ArrayLike<number>,
+  g: number,
+  count: number,
+): FamilyResult {
+  const base: FamilyResult = {
+    g,
+    count,
+    pairs: 0,
+    kept: 0,
+    consistency: 0,
+    strength: 0,
+    pitch: 0,
+    colPairs: [],
+    viable: false,
+  };
   // 找所有候选列（相邻强峰间距 ≈ g），交由下方的"等距网格拟合"统一裁决。
   const tol = Math.max(2, Math.round(0.25 * g));
   const candPairs: Array<[number, number]> = [];
   for (let i = 0; i < strong.length - 1; i++) {
     if (Math.abs(d[i]! - g) <= tol) candPairs.push([strong[i]!, strong[i + 1]!]);
   }
-  if (candPairs.length < 4) return null;
+  if (candPairs.length < 4) return base;
+  base.pairs = candPairs.length;
 
   // 列中心（升序）
   const centers = candPairs.map(([a, b]) => (a + b) / 2).sort((x, y) => x - y);
   const cg: number[] = [];
   for (let j = 0; j < centers.length - 1; j++) cg.push(centers[j + 1]! - centers[j]!);
-  if (cg.length < 2) return null;
+  if (cg.length < 2) return base;
 
   // pitch = 列中心间距的中位数（稳健，不受单个离群列/漏列影响）
   const pitch = medianOf(cg);
-  if (pitch <= 0) return null;
+  if (pitch <= 0) return base;
+  base.pitch = pitch;
 
   // 相位 = 各 (center mod pitch) 的圆中位数：真实棋盘的所有列共相位，
   // 而 UI 边框 / 错配列的相位偏离 → 下方用残差把它们剔除。
@@ -348,14 +425,48 @@ function statisticalPairing(
   if (pairs.length < 4) pairs = candPairs; // 兜底：网格判定过严时退回全部候选
   pairs = pairs.slice().sort((p, q) => p[0] - q[0]);
 
-  // 一致性：保留列相邻中心间距 ≈ pitch 的比例
+  // [最稠密连续列块] 相邻中心间距 ≤ RUN_GAP_FRAC·pitch 视为连续；
+  // 孤立的 UI 假列（同宽但远离棋盘）自成一块，在此被切出——
+  // consistency / strength / 返回列集均基于该最稠密块计算。
   const keptCenters = pairs.map(([a, b]) => (a + b) / 2);
-  const kcg: number[] = [];
-  for (let j = 0; j < keptCenters.length - 1; j++) kcg.push(keptCenters[j + 1]! - keptCenters[j]!);
+  const maxGap = RUN_GAP_FRAC * pitch;
+  let runStart = 0;
+  let runEnd = 1;
+  let curStart = 0;
+  for (let j = 1; j < pairs.length; j++) {
+    if (keptCenters[j]! - keptCenters[j - 1]! > maxGap) curStart = j;
+    if (j - curStart + 1 > runEnd - runStart) {
+      runStart = curStart;
+      runEnd = j + 1;
+    }
+  }
+  const run = pairs.slice(runStart, runEnd);
+  if (run.length < 4) return base; // 最稠密块也不足 4 列 → 该族不成立
+  base.viable = true;
+  base.kept = run.length;
+  base.colPairs = run;
+
+  // 一致性：最稠密块内相邻中心间距 ≈ pitch 的比例
   let within = 0;
-  for (const v of kcg) if (Math.abs(v - pitch) <= 0.3 * pitch) within++;
-  const n = pairs.length;
-  return { g, pitch, consistency: kcg.length > 0 ? within / kcg.length : 1, pairs, n };
+  for (let j = 1; j < run.length; j++) {
+    const gap = keptCenters[runStart + j]! - keptCenters[runStart + j - 1]!;
+    if (Math.abs(gap - pitch) <= 0.3 * pitch) within++;
+  }
+  base.consistency = within / (run.length - 1);
+
+  // 强度：最稠密块内列的平均强度（每列两条边界格线强度的均值）
+  base.strength = run.reduce((s, [a, b]) => s + (col[a]! + col[b]!), 0) / (2 * run.length);
+  return base;
+}
+
+/** 族比较：consistency 降序 → strength 降序（噪声带内视为平手）→ 列宽较大者胜。 */
+function betterFamily(a: FamilyResult, b: FamilyResult | null): boolean {
+  if (b === null || !b.viable) return a.viable;
+  if (!a.viable) return false;
+  if (a.consistency !== b.consistency) return a.consistency > b.consistency;
+  const eps = Math.max(2, STRENGTH_TIE_BAND * Math.max(a.strength, b.strength));
+  if (Math.abs(a.strength - b.strength) > eps) return a.strength > b.strength;
+  return a.g > b.g;
 }
 
 
@@ -417,7 +528,7 @@ function seamSegments(
 
 /* ------------------------------ [3] 棋盘范围 ------------------------------ */
 
-interface Board {
+export interface Board {
   bbox: [number, number, number, number];
   width: number;
   height: number;
@@ -783,16 +894,57 @@ function clusterColors(cells: number[][][], k: number): Clustered {
 
 /* ------------------------------ 总入口 ------------------------------ */
 
-/**
- * 棋盘识别总入口：`BoardImage`（像素）→ `DetectResult`（N、颜色矩阵、代表色…）。
- *
- * 失败（图太小 / 找不到配对 / 找不到棋盘）时 `ok=false` 并给出 `error`。
- * 颜色聚类若不足 N 组仍会返回结果，但 `ok=false` 并提示"可能不准确"。
- */
-export function detectBoard(img: BoardImage): DetectResult {
+/** 管线各步中间结果（调试用）。 */
+export interface PipelineDebug {
+  /** 识别结果（同 {@link detectBoard} 返回）。 */
+  result: DetectResult;
+  /** [0] 灰度图。 */
+  gray: Uint8Array;
+  /** [0] Sobel 梯度幅值图（0–255，99.5 分位拉伸）。 */
+  grad: Uint8Array;
+  /** [1] 列强度剖面（每列 > THR 的像素数）。 */
+  col: Int32Array;
+  /** [1] 强峰位置（升序）。 */
+  peaks: number[];
+  /** [1] 多族投票明细（哪些间隔族参选、胜出族及其打分）。 */
+  families: FamilyScore[];
+  /** [1] 列配对结果（失败时 null）。 */
+  pair: PairResult | null;
+  /** [2] 接缝段 `(a, b, y0, y1)`。 */
+  segs: Array<[number, number, number, number]>;
+  /** [3] 棋盘范围（失败时 null）。 */
+  board: Board | null;
+  /** [4] 各格"有色区域"边界（失败时 null）。 */
+  bounds: BoardBounds | null;
+  /** [4] 每格采样颜色 `cells[r][c] = [r, g, b]`（失败时 null）。 */
+  cells: number[][][] | null;
+  /** [5] 聚类标签 `labels[r][c]`（失败时 null）。 */
+  labels: number[][] | null;
+  /** [5] 代表色 `reps[c] = [r, g, b]`（失败时 null）。 */
+  reps: number[][] | null;
+}
+
+/** 识别管线本体：依次执行 [0]–[5]，同时保留各步中间结果。 */
+function runPipeline(img: BoardImage): PipelineDebug {
   const W = img.width;
   const H = img.height;
-  if (W < 16 || H < 16) return fail("图像太小，无法识别棋盘");
+  if (W < 16 || H < 16) {
+    return {
+      result: fail("图像太小，无法识别棋盘"),
+      gray: new Uint8Array(0),
+      grad: new Uint8Array(0),
+      col: new Int32Array(0),
+      peaks: [],
+      families: [],
+      pair: null,
+      segs: [],
+      board: null,
+      bounds: null,
+      cells: null,
+      labels: null,
+      reps: null,
+    };
+  }
 
   // [0] 梯度图 + [1] 列强度剖面 / 峰值
   const gray = toGray(img.rgba, W * H);
@@ -807,8 +959,25 @@ export function detectBoard(img: BoardImage): DetectResult {
   }
   const maxCol = maxOf(col);
   const peaks = findPeaks(col, maxCol * 0.2, 3);
-  const pair = statisticalPairing(peaks, col);
-  if (!pair) return fail("未找到一致的列配对（可能不是 N×N 棋盘截图）");
+  const families: FamilyScore[] = [];
+  const pair = statisticalPairing(peaks, col, families);
+  if (!pair) {
+    return {
+      result: fail("未找到一致的列配对（可能不是 N×N 棋盘截图）"),
+      gray,
+      grad,
+      col,
+      peaks,
+      families,
+      pair: null,
+      segs: [],
+      board: null,
+      bounds: null,
+      cells: null,
+      labels: null,
+      reps: null,
+    };
+  }
 
   // [2] 接缝段（基于梯度图：边缘处梯度强、格子内部梯度弱）
   const segs: Array<[number, number, number, number]> = [];
@@ -816,9 +985,26 @@ export function detectBoard(img: BoardImage): DetectResult {
 
   // [3] 棋盘范围
   const board = computeBoard(pair.pairs, col, segs);
-  if (!board) return fail("未找到棋盘区域");
+  if (!board) {
+    return {
+      result: fail("未找到棋盘区域"),
+      gray,
+      grad,
+      col,
+      peaks,
+      families,
+      pair,
+      segs,
+      board: null,
+      bounds: null,
+      cells: null,
+      labels: null,
+      reps: null,
+    };
+  }
 
   // [4] 颜色采样
+  const bounds = cellBounds(board);
   const cells = sampleCells(img, board);
 
   // [5] 颜色聚类（K = 网格边长 N）
@@ -836,7 +1022,7 @@ export function detectBoard(img: BoardImage): DetectResult {
 
   // 应恰有 N 个不同颜色；不足则标记"可能不准确"
   const ok = used.size === k;
-  return {
+  const result: DetectResult = {
     ok,
     error: ok ? undefined : `颜色聚类得到 ${used.size} 组（期望 ${k} 组），结果可能不准确`,
     n: k,
@@ -845,5 +1031,25 @@ export function detectBoard(img: BoardImage): DetectResult {
     bbox: board.bbox,
     sizes,
   };
+  return { result, gray, grad, col, peaks, families, pair, segs, board, bounds, cells, labels, reps };
+}
+
+/**
+ * 棋盘识别总入口：`BoardImage`（像素）→ `DetectResult`（N、颜色矩阵、代表色…）。
+ *
+ * 失败（图太小 / 找不到配对 / 找不到棋盘）时 `ok=false` 并给出 `error`。
+ * 颜色聚类若不足 N 组仍会返回结果，但 `ok=false` 并提示"可能不准确"。
+ */
+export function detectBoard(img: BoardImage): DetectResult {
+  return runPipeline(img).result;
+}
+
+/**
+ * 调试入口：与 {@link detectBoard} 完全相同的管线，额外返回各步中间结果
+ * （梯度图 / 列剖面 / 峰值 / 配对 / 接缝段 / 棋盘范围 / 采样色 / 聚类标签），
+ * 供 Node 端逐步渲染排查。
+ */
+export function detectBoardDebug(img: BoardImage): PipelineDebug {
+  return runPipeline(img);
 }
 

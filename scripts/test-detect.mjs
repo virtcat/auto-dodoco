@@ -7,7 +7,7 @@
  *   - 颜色矩阵正确（每格颜色 = 该列的颜色）；
  *   - 代表色恰有 N 组。
  *
- * 用途：在无法用浏览器打开 dev server 时，对移植算法做一次端到端冒烟。
+ * 用途：在无法用浏览器打开 dev server 时，对识别管线做一次端到端冒烟测试。
  * 用法：node scripts/test-detect.mjs
  */
 
@@ -162,7 +162,7 @@ function runCase(N) {
 
 for (const N of [8, 10, 11]) runCase(N);
 
-// 拉丁方（每色散落 N 次）——更接近真实棋盘
+// 拉丁方（每色散落 N 次）
 for (const N of [10, 12]) {
   console.log(`\n[case] N=${N}（拉丁方 / 偏移棋盘）`);
   const img = makeLatinBoard(N);
